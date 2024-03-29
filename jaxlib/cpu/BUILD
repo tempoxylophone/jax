@@ -36,8 +36,10 @@ cc_library(
     copts = ["-fexceptions"],
     features = ["-use_header_modules"],
     deps = [
-        "@xla//xla/service:custom_call_status",
+        "@xla//xla/ffi/api:ffi",
+        "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/base:dynamic_annotations",
+        "@com_google_absl//absl/strings:str_format",
     ],
 )
 
@@ -116,10 +118,9 @@ cc_library(
     srcs = ["cpu_kernels.cc"],
     visibility = ["//visibility:public"],
     deps = [
-        ":ducc_fft_kernels",
         ":lapack_kernels",
         ":lapack_kernels_using_lapack",
-        "@xla//xla/service:custom_call_target_registry",
+        "@xla//xla/ffi:ffi_api",
     ],
     alwayslink = 1,
 )

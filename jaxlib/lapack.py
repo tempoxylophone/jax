@@ -19,7 +19,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-import jaxlib.mlir.ir as ir
+import jaxlib.mlir.ir as ir  # pylint: disable=consider-using-from-import
 import jaxlib.mlir.dialects.stablehlo as hlo
 
 from jaxlib import xla_client
@@ -32,7 +32,12 @@ from .hlo_helpers import (
 from .cpu import _lapack
 
 for _name, _value in _lapack.registrations().items():
-  xla_client.register_custom_call_target(_name, _value, platform="cpu")
+  xla_client.register_custom_call_target(_name, _value, platform="cpu",
+                                         api_version=1)
+
+
+def char_attr(c):
+  return ir.IntegerAttr.get(ir.IntegerType.get_unsigned(8), ord(c))
 
 
 # TODO(phawkins): it would be nice to avoid duplicating code for each type.
@@ -46,12 +51,8 @@ def trsm_hlo(dtype, alpha, a, b,
   _lapack.initialize()
   b_type = ir.RankedTensorType(b.type)
 
-  m, n = b_shape_vals[-2:]
   batch_dims_vals = b_shape_vals[:-2]
   num_bd = len(batch_dims_vals)
-  batch_size_val = hlo_s32(1)
-  for b_v in batch_dims_vals:
-    batch_size_val = hlo.multiply(batch_size_val, ensure_hlo_s32(b_v))
 
   if dtype == np.float32:
     fn = "blas_strsm"
@@ -73,14 +74,20 @@ def trsm_hlo(dtype, alpha, a, b,
   return custom_call(
       fn,
       result_types=result_types,
-      operands=[hlo_s32(int(left_side)), hlo_s32(int(lower)),
-       hlo_s32((2 if conj_a else 1) if trans_a else 0), hlo_s32(int(diag)),
-       ensure_hlo_s32(m), ensure_hlo_s32(n), batch_size_val,
-       alpha, a, b],
-      operand_layouts=[scalar_layout] * 8 + [layout] * 2,
+      operands=[
+          a, b, alpha
+      ],
+      operand_layouts=[layout] * 2 + [scalar_layout],
       result_layouts=[layout],
-      operand_output_aliases={9: 0},
+      operand_output_aliases={1: 0},
       result_shapes=result_shapes,
+      backend_config={
+        'side': char_attr('L' if left_side else 'R'),
+        'uplo': char_attr('L' if lower else 'U'),
+        'trans_x': char_attr(('C' if conj_a else 'T') if trans_a else 'N'),
+        'diag': char_attr('U' if diag else 'N'),
+      },
+      api_version=4,
   ).results
 
 
@@ -106,7 +113,6 @@ def getrf_hlo(dtype, a: ir.Value, *,
   else:
     raise NotImplementedError(f"Unsupported dtype {dtype}")
 
-  scalar_layout = []
   layout = (num_bd, num_bd + 1) + tuple(range(num_bd - 1, -1, -1))
 
   i32_type = ir.IntegerType.get_signless(32)
@@ -117,22 +123,20 @@ def getrf_hlo(dtype, a: ir.Value, *,
   ]
   result_types, result_shapes = mk_result_types_and_shapes(shape_type_pairs)
 
-  batch_size_val = hlo_s32(1)
-  for b_v in batch_dims_vals:
-    batch_size_val = hlo.multiply(batch_size_val, ensure_hlo_s32(b_v))
-
   return custom_call(
       fn,
       result_types=result_types,
-      operands=[batch_size_val, ensure_hlo_s32(m), ensure_hlo_s32(n), a],
-      operand_layouts=[scalar_layout] * 3 + [layout],
+      operands=[a],
+      operand_layouts=[layout],
       result_layouts=[
         layout,
         tuple(range(num_bd, -1, -1)),
         tuple(range(num_bd - 1, -1, -1)),
       ],
-      operand_output_aliases={3: 0},
+      operand_output_aliases={0: 0},
       result_shapes=result_shapes,
+      backend_config={},
+      api_version=4,
   ).results
 
 # # ?geqrf: QR decomposition
@@ -209,9 +213,6 @@ def orgqr_hlo(dtype, a: ir.Value, tau, *,
   assert n != ir.ShapedType.get_dynamic_size()
   batch_dims_vals = dims_vals[:-2]
   num_bd = len(batch_dims_vals)
-  batch_size_val = hlo_s32(1)
-  for b_v in batch_dims_vals:
-    batch_size_val = hlo.multiply(batch_size_val, ensure_hlo_s32(b_v))
 
   k = tau_shape_vals[-1]
   assert type(k) is int
@@ -231,7 +232,6 @@ def orgqr_hlo(dtype, a: ir.Value, tau, *,
   else:
     raise NotImplementedError(f"Unsupported dtype {dtype}")
 
-  scalar_layout = []
   layout = (num_bd, num_bd + 1) + tuple(range(num_bd - 1, -1, -1))
   i32_type = ir.IntegerType.get_signless(32)
   shape_type_pairs: Sequence[ShapeTypePair] = [
@@ -243,9 +243,10 @@ def orgqr_hlo(dtype, a: ir.Value, tau, *,
   out = custom_call(
       fn,
       result_types=result_types,
-      operands=[batch_size_val, hlo_s32(m), hlo_s32(n), hlo_s32(k),
-       hlo_s32(lwork), a, tau],
-      operand_layouts=[scalar_layout] * 5 + [
+      operands=[
+       a, tau
+      ],
+      operand_layouts=[
         layout,
         tuple(range(num_bd, -1, -1)),
       ],
@@ -254,8 +255,10 @@ def orgqr_hlo(dtype, a: ir.Value, tau, *,
         tuple(range(num_bd - 1, -1, -1)),
         [0],
       ],
-      operand_output_aliases={5: 0},
+      operand_output_aliases={0: 0},
       result_shapes=result_shapes,
+      backend_config={},
+      api_version=4,
   ).results
   return out[:2]
 
