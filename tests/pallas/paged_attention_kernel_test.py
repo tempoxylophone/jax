@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
+
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 from jax._src import test_util as jtu
 from jax.experimental.pallas.ops.tpu import paged_attention
+from jax.experimental.pallas.ops.tpu.paged_attention import quantization_utils
 import jax.numpy as jnp
 import numpy as np
 
@@ -33,6 +36,7 @@ def _generate_qkv(
     head_dim,
     prng_key,
     dtype=jnp.float32,
+    are_kv_quantized=False,
 ):
   assert max_seq_len % page_size == 0
   pages_per_sequence = max_seq_len // page_size
@@ -45,6 +49,11 @@ def _generate_qkv(
   v_pages = jax.random.normal(
       k2, (num_kv_heads, total_pages, page_size, head_dim), dtype=dtype
   )
+
+  if are_kv_quantized:
+    k_pages = quantization_utils.quantize_to_int8(k_pages)
+    v_pages = quantization_utils.quantize_to_int8(v_pages)
+
   page_indices = jnp.arange(batch_size * pages_per_sequence, dtype=jnp.int32)
   page_indices = jax.random.permutation(k3, page_indices, independent=True)
   page_indices = page_indices.reshape(batch_size, pages_per_sequence)
@@ -53,6 +62,9 @@ def _generate_qkv(
 
 
 def _reconstruct_kv(page_indices, pages):
+  if isinstance(pages, quantization_utils.QuantizedTensor):
+    pages = quantization_utils.unquantize_from_int8(pages, dtype=jnp.float32)
+
   batch_size = page_indices.shape[0]
   num_heads, _, _, head_dim = pages.shape
 
@@ -71,6 +83,12 @@ def _grouped_query_attention_reference(q, k, v, lengths):
   assert k.shape == v.shape
   assert num_heads % num_kv_heads == 0
   q = q.reshape(batch_size, num_kv_heads, num_heads // num_kv_heads, head_dim)
+
+  if isinstance(k, quantization_utils.QuantizedTensor):
+    k = quantization_utils.unquantize_from_int8(k, dtype=jnp.float32)
+  if isinstance(v, quantization_utils.QuantizedTensor):
+    v = quantization_utils.unquantize_from_int8(v, dtype=jnp.float32)
+
   logits = jnp.einsum(
       "bhgd,bhtd->bhgt", q.astype(jnp.float32), k.astype(jnp.float32)
   )
@@ -101,6 +119,10 @@ class PagedAttentionKernelTest(jtu.JaxTestCase):
       q_kv_head_ratio=(1, 4, 8),
       head_dim=(128, 256),
       megacore_mode=("batch", "kv_head", None),
+      are_kv_quantized=(
+          False,
+          True,
+      ),
   )
   def test_paged_attention(
       self,
@@ -110,9 +132,19 @@ class PagedAttentionKernelTest(jtu.JaxTestCase):
       q_kv_head_ratio,
       head_dim,
       megacore_mode,
+      are_kv_quantized,
   ):
     if not jtu.is_device_tpu_at_least(4):
       self.skipTest("Only supports TPU generation 4 or above")
+    if sys.version_info <= (3, 9):
+      # Multiple inheritance involving `NamedTuple` in `QuantizedTensor` is not
+      # supported in Python 3.9 and lower.
+      self.skipTest("Quantization is not supported in Python 3.9 and lower")
+    if jtu.is_device_tpu(version=4) and are_kv_quantized:
+      # TPU v4 has only 16MiB of VMEM which is not sufficient to store both the
+      # weight and scale tensors for quantized tensors. When enabled on TPUv4,
+      # the tests sometimes failed with resource exhausted error.
+      self.skipTest("Quantization is not supported on TPU v4")
     if megacore_mode and not _megacore_enabled():
       self.skipTest("Megacore is only available on TPU v4 or TPU v5p")
     if num_kv_heads % 2 != 0 and megacore_mode == "kv_head":
@@ -129,6 +161,7 @@ class PagedAttentionKernelTest(jtu.JaxTestCase):
         head_dim,
         jax.random.key(0),
         dtype,
+        are_kv_quantized=are_kv_quantized,
     )
     o = paged_attention.paged_attention(
         q,
@@ -146,7 +179,7 @@ class PagedAttentionKernelTest(jtu.JaxTestCase):
     if q_kv_head_ratio > 1:
       atol, rtol = 1e-2, 2e-2
     else:
-      atol, rtol = 1e-1, 1e-1
+      atol, rtol = 2e-1, 1e-1
     np.testing.assert_allclose(
         o[np.where(seq_lens > 0)].astype(jnp.float32),
         o_ref[np.where(seq_lens > 0)].astype(jnp.float32),
