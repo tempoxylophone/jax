@@ -255,6 +255,36 @@ jax_test(
 )
 
 jax_test(
+    name = "mosaic_gpu_test",
+    srcs = [
+        "mosaic_gpu_test.py",
+    ],
+    disable_backends = [
+        "cpu",
+        "tpu",
+    ],
+    disable_configs = [
+        "gpu",
+        "gpu_x32",
+        "gpu_a100",
+        "gpu_a100_x32",
+        "gpu_p100",
+        "gpu_p100_x32",
+        "gpu_h100",
+    ],
+    enable_configs = [
+        "gpu_h100_x32",
+    ],
+    env = {
+        "JAX_PALLAS_USE_MOSAIC_GPU": "1",
+    },
+    deps = [
+        "//jax:pallas",
+        "//jax:pallas_gpu",  # build_cleaner: keep
+    ] + py_deps("absl/testing") + py_deps("numpy"),
+)
+
+jax_test(
     name = "export_back_compat_pallas_test",
     srcs = ["export_back_compat_pallas_test.py"],
     config_tags_overrides = {
