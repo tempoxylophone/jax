@@ -50,6 +50,7 @@
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/types/span.h"
+#include "third_party/llvm/llvm-project/llvm/include/llvm/ADT/SmallVector.h"
 #include "mlir/include/mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/include/mlir/Dialect/Vector/IR/VectorOps.h"
 #include "mlir/include/mlir/IR/Builders.h"
@@ -4514,6 +4515,26 @@ FailureOr<TypedValue<VectorType>> relayout(
           v.getLoc(), src_tiles.begin()->getType(), parts);
     });
     src = new_src;
+    src_tiles = std::move(src_tiles_retiled);
+  } else if (  // Handle retiling from (8, 128, -2) to (8, 128) for 32-bit data.
+               // This drops the implicit second minor dimension.
+      src.implicit_dim() == VectorLayout::ImplicitDim::kSecondMinor &&
+      dst.implicit_dim() == VectorLayout::ImplicitDim::kNone &&
+      src.bitwidth() == 32 && src.offsets() == dst.offsets() &&
+      src.offsets() == LayoutOffsets{0, 0} && src.tiling() == dst.tiling() &&
+      src.tiling() == std::array<int64_t, 2>{8, 128}) {
+    xla::Array<Value> src_tiles_retiled(
+        dst.tileArrayShape(vty.getShape(), target_shape));
+    src_tiles_retiled.Each(
+        [&](const absl::Span<const int64_t> idx, Value *tile) {
+          for (int dst_sl_idx = 0; dst_sl_idx < 8; ++dst_sl_idx) {
+            SmallVector<int64_t> src_idx(idx.begin(), idx.end());
+            src_idx[src_idx.size() - 2] = 8 * idx[idx.size() - 2] + dst_sl_idx;
+            *tile = copy_one_sublane(builder, src_tiles(src_idx), 0, *tile,
+                                     dst_sl_idx, target_shape);
+          }
+        });
+    src = dst;
     src_tiles = std::move(src_tiles_retiled);
   }
 

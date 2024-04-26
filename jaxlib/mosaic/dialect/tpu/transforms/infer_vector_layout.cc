@@ -683,12 +683,23 @@ class VectorLayoutInferer {
     }
     auto res_ty = op.getResult().getType();
     int8_t bitwidth = res_ty.getElementTypeBitWidth();
-    auto layout = (dimension >= res_rank - 2)
-                      ? VectorLayout(bitwidth, {0, 0}, nativeTiling(bitwidth),
-                                     ImplicitDim::kNone)
-                      : getLayout(op.getSources().front());
+    auto layout = getLayout(op.getSources().front());
+    if (layout->offsets()[0].value_or(0) != 0 ||
+        layout->offsets()[1].value_or(0) != 0) {
+      NYI("Support concatenation with non zero offsets");
+    }
+    if (dimension >= res_rank - 2) {
+      layout = VectorLayout(bitwidth, {0, 0}, nativeTiling(bitwidth),
+                            ImplicitDim::kNone);
+    }
+    // Reset offsets to 0 when concatenating matrices with replicated offset.
+    if (!layout->offsets()[0].has_value() ||
+        !layout->offsets()[1].has_value()) {
+      layout = VectorLayout(layout->bitwidth(), {0, 0}, layout->tiling(),
+                            layout->implicit_dim());
+    }
     SmallVector<Layout> in_layouts(op->getNumOperands(), layout);
-    setLayout(op, in_layouts, in_layouts.back());
+    setLayout(op, in_layouts, layout);
     return success();
   }
 
