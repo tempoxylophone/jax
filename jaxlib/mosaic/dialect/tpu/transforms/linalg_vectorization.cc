@@ -21,6 +21,7 @@ limitations under the License.
 #include "mlir/include/mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/include/mlir/Dialect/Linalg/Transforms/Hoisting.h"
 #include "mlir/include/mlir/Dialect/Linalg/Transforms/Transforms.h"
+#include "mlir/include/mlir/Dialect/Math/IR/Math.h"
 #include "mlir/include/mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/include/mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/include/mlir/Dialect/Vector/IR/VectorOps.h"
@@ -34,7 +35,9 @@ limitations under the License.
 #include "mlir/include/mlir/IR/DialectRegistry.h"
 #include "mlir/include/mlir/IR/Matchers.h"
 #include "mlir/include/mlir/IR/Operation.h"
+#include "mlir/include/mlir/IR/OperationSupport.h"
 #include "mlir/include/mlir/IR/PatternMatch.h"
+#include "mlir/include/mlir/IR/Types.h"
 #include "mlir/include/mlir/IR/Value.h"
 #include "mlir/include/mlir/Pass/Pass.h"
 #include "mlir/include/mlir/Support/LLVM.h"
@@ -275,6 +278,53 @@ struct TransferReadOfSplat
   }
 };
 
+// Rewrite operation with bf16 inputs/outputs into an operation with f32
+// inputs/outputs, where the inputs are extended and the outputs truncated.
+// Non-bf16 operands remain unchanged.
+class GenericBitwidthConvert : public RewritePattern {
+ public:
+  explicit GenericBitwidthConvert(llvm::StringRef operation_name,
+                                  MLIRContext *ctx)
+      : RewritePattern(operation_name, 0, ctx) {}
+  LogicalResult matchAndRewrite(Operation *op,
+                                PatternRewriter &rewriter) const override {
+    llvm::SmallVector<Value> extended_operands;
+    extended_operands.reserve(op->getOperands().size());
+    Location loc = op->getLoc();
+    for (Value operand : op->getOperands()) {
+      auto operand_type = dyn_cast<VectorType>(operand.getType());
+      if (!operand_type) {
+        return rewriter.notifyMatchFailure(op, "operand not a vector");
+      }
+      if (!operand_type || !operand_type.getElementType().isBF16()) {
+        extended_operands.push_back(operand);
+        continue;
+      }
+      extended_operands.push_back(rewriter.create<arith::ExtFOp>(
+          loc, VectorType::get(operand_type.getShape(), rewriter.getF32Type()),
+          operand));
+    }
+    llvm::SmallVector<Type> new_results;
+    for (Type result_ty : op->getResultTypes()) {
+      auto result_type = dyn_cast<VectorType>(result_ty);
+      if (!result_type) {
+        return rewriter.notifyMatchFailure(op, "result is not a vector");
+      }
+      if (!result_type || !result_type.getElementType().isBF16()) {
+        return failure();
+      }
+      new_results.push_back(
+          VectorType::get(result_type.getShape(), rewriter.getF32Type()));
+    }
+    OperationState state(loc, op->getName().getStringRef(), extended_operands,
+                         new_results, op->getAttrs(), op->getSuccessors());
+    Operation *new_op = rewriter.create(state);
+    rewriter.replaceOpWithNewOp<arith::TruncFOp>(op, op->getResultTypes(),
+                                                 new_op->getResults());
+    return success();
+  }
+};
+
 struct LinalgVectorizationPass
     : public impl::LinalgVectorizationPassBase<LinalgVectorizationPass> {
   LinalgVectorizationPass() = default;
@@ -299,6 +349,33 @@ struct LinalgVectorizationPass
     patterns.add<TransferReadOfCmpI, TransferReadOfCollapseShape,
                  TransferReadOfConstant, TransferReadOfExpandShape,
                  TransferReadOfSelect, TransferReadOfSplat>(ctx);
+    // Pull in patterns to convert bf16 ops to f32 ops.
+    // TODO(b/324596736): Since future TPU versions might support bf16
+    // arithmetic, we need to pass `Target` (or equivalent) and perform these
+    // rewrites conditionally based on the capabilities of the underlying
+    // hardware.
+    for (::llvm::StringLiteral unary_op_name :
+         {arith::NegFOp::getOperationName(), math::TanhOp::getOperationName(),
+          math::ExpOp::getOperationName(), math::AbsFOp::getOperationName(),
+          math::SinOp::getOperationName(), math::CosOp::getOperationName(),
+          math::SqrtOp::getOperationName(), math::RsqrtOp::getOperationName(),
+          math::LogOp::getOperationName(), math::Log1pOp::getOperationName(),
+          math::RoundOp::getOperationName(),
+          math::RoundEvenOp::getOperationName()}) {
+      patterns.add<GenericBitwidthConvert>(unary_op_name, ctx);
+    }
+    for (::llvm::StringLiteral binary_op_name :
+         {arith::MulFOp::getOperationName(), arith::DivFOp::getOperationName(),
+          arith::AddFOp::getOperationName(), arith::SubFOp::getOperationName(),
+          arith::MaximumFOp::getOperationName(),
+          arith::MinimumFOp::getOperationName(),
+          math::PowFOp::getOperationName()}) {
+      patterns.add<GenericBitwidthConvert>(binary_op_name, ctx);
+    }
+    for (::llvm::StringLiteral ternary_op_name :
+         {arith::SelectOp::getOperationName()}) {
+      patterns.add<GenericBitwidthConvert>(ternary_op_name, ctx);
+    }
 
     // We do not want to apply the vector patterns above to the ops that are
     // unrelated to the original linalg op.
