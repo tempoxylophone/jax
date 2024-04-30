@@ -236,9 +236,11 @@ LogicalResult RotateOp::verify() {
     emitOpError("Invalid dimension: ") << getDimension();
     return failure();
   }
-  if (getAmount() < 0) {
-    emitOpError("Rotate amount must be >= 0");
-    return failure();
+  if (auto cst = getAmount().getDefiningOp<arith::ConstantOp>()) {
+    if (cast<IntegerAttr>(cst.getValue()).getInt() < 0) {
+      emitOpError("Rotate amount must be >= 0");
+      return failure();
+    }
   }
   if (getStride().has_value() && getStride().value() < 0) {
     emitOpError("Rotate stride must be >= 0 if it is specified");

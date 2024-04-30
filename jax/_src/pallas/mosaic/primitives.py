@@ -105,13 +105,13 @@ roll_p = jax_core.Primitive("roll")
 
 def roll(
     x,
-    shift: int,
+    shift,
     axis: int,
     *,
     stride: int | None = None,
     stride_axis: int | None = None,
 ):
-  if shift < 0:
+  if isinstance(shift, int) and shift < 0:
     raise ValueError("shift must be non-negative.")
   if axis < 0 or axis >= len(x.shape):
     raise ValueError("axis is out of range.")
