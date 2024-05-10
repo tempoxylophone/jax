@@ -44,21 +44,6 @@ _minimum_jaxlib_version = _version_module._minimum_jaxlib_version
 with open('README.md', encoding='utf-8') as f:
   _long_description = f.read()
 
-if 'PROTOC' in os.environ and os.path.exists(os.environ['PROTOC']):
-  protoc = os.environ['PROTOC']
-else:
-  protoc = spawn.find_executable('protoc')
-
-def generate_proto(source):
-  if not protoc or not os.path.exists(source):
-    return
-  protoc_command = [protoc, '-I.', '--python_out=.', source]
-  if subprocess.call(protoc_command) != 0:
-    sys.exit(-1)
-
-generate_proto("jax/experimental/australis/executable.proto")
-generate_proto("jax/experimental/australis/petri.proto")
-
 setup(
     name=project_name,
     version=__version__,
@@ -102,9 +87,6 @@ setup(
           f'libtpu-nightly=={_libtpu_version}',
           'requests',  # necessary for jax.distributed.initialize
         ],
-
-        # $ pip install jax[australis]
-        'australis': ['protobuf>=3.13,<4'],
 
         # CUDA installations require adding the JAX CUDA releases URL, e.g.,
         # Cuda installation defaulting to a CUDA and Cudnn version defined above.
