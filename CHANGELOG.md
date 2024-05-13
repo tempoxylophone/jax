@@ -13,6 +13,14 @@ Remember to align the itemized text with the first line of an item within a list
     more cases. Previously non-parallel computations were always dispatched
     synchronously. You can recover the old behavior by setting
     `jax.config.update('jax_cpu_enable_async_dispatch', False)`.
+* Deprecations
+  * Removed a number of previously-deprecated APIs:
+    * from {mod}`jax.core`: `non_negative_dim`, `DimSize`, `Shape`
+    * from {mod}`jax.lax`: `tie_in`
+    * from {mod}`jax.nn`: `normalize`
+    * from {mod}`jax.interpreters.xla`: `backend_specific_translations`,
+      `translations`, `register_translation`, `xla_destructure`,
+      `TranslationRule`, `TranslationContext`, `XlaOp`.
 
 ## jaxlib 0.4.29
 
